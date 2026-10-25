@@ -1221,7 +1221,9 @@ static void option_apply(OptionDef *o)
             continue;
         wsprintf(ok, "Old.%s.%d", (LPSTR)o->name, n);
         if (!GetProfileString(g_key, ok, "", saved, sizeof(saved))) {
-            if (GetPrivateProfileString(s, k, "\1", cur, sizeof(cur), e) == 1 && cur[0] == 1)
+            /* (Windows drops control characters from the default) */
+            GetPrivateProfileString(s, k, "~W16~NONE~", cur, sizeof(cur), e);
+            if (lstrcmp(cur, "~W16~NONE~") == 0)
                 lstrcpy(saved, "*");
             else
                 wsprintf(saved, ">%s", (LPSTR)cur);
