@@ -27,8 +27,8 @@
  * shell= in the installation directory) cannot be stopped - ending the
  * shell ends Windows. To replace or remove its files Setup copies itself
  * to TEMP\W16STAGE, makes Program Manager the shell, adds the copy to
- * WIN.INI run= (its command line is kept in WIN.INI) and restarts Windows; the resumed Setup puts
- * shell= back, does the work and restarts Windows again if needed.
+ * WIN.INI run= (its command line is kept in W16STAGE\RESUME.INI) and restarts Windows; the resumed
+ * Setup puts shell= back, does the work and restarts Windows again if needed.
  *
  * Removing with the installed copy: a running EXE cannot delete itself, so
  * SETUP copies itself to the TEMP directory under another module name
@@ -57,6 +57,7 @@
 #define MODNAME     "W16SETUP"
 #define MODNAME_TMP "W16UNINS"
 #define STAGE_DIR   "W16STAGE"
+#define RESUME_INI  "RESUME.INI"    /* in the stage directory */
 
 /* an [Options] entry: section [Option.<name>] */
 typedef struct {
@@ -1392,7 +1393,7 @@ static void resume_args(char *cmd, BOOL remove)
  * with Program Manager as the shell. */
 static BOOL handover(BOOL remove)
 {
-    char stage[MAX_PATHLEN], t[MAX_TEXT], cmd[MAX_TEXT], sh[MAX_PATHLEN];
+    char stage[MAX_PATHLEN], t[MAX_TEXT], cmd[MAX_TEXT], sh[MAX_PATHLEN], ini[MAX_PATHLEN + 16];
     if (remove)
         wsprintf(t, "%s is the Windows shell and cannot be removed while it runs.\r\n\r\nSetup will "
                     "restart Windows with Program Manager and finish there.", (LPSTR)g_product);
@@ -1408,12 +1409,16 @@ static BOOL handover(BOOL remove)
         say("Setup could not copy itself to the TEMP directory and cannot continue.", MB_ICONSTOP);
         return FALSE;
     }
+    /* kept in a file of our own: a WIN.INI with NUL padding at its end
+     * (found on some installations) hides sections added to it */
     resume_args(cmd, remove);
-    WriteProfileString(g_key, "Resume", cmd);
+    wsprintf(ini, "%s\\%s", (LPSTR)stage, (LPSTR)RESUME_INI);
+    WritePrivateProfileString("Resume", "Cmd", cmd, ini);
     GetPrivateProfileString("boot", "shell", "progman.exe", sh, sizeof(sh), "SYSTEM.INI");
-    WriteProfileString(g_key, "ResumeShell", sh);
+    WritePrivateProfileString("Resume", "Shell", sh, ini);
+    WritePrivateProfileString(NULL, NULL, NULL, ini);     /* flush */
     WritePrivateProfileString("boot", "shell", "progman.exe", "SYSTEM.INI");
-    /* run= takes no arguments: the staged copy finds Resume= in WIN.INI */
+    /* run= takes no arguments: the staged copy finds RESUME.INI next to it */
     wsprintf(t, "%s\\SETUP.EXE", (LPSTR)stage);
     edit_list("run", t, t);
     log_line(t);
@@ -1425,9 +1430,18 @@ static BOOL handover(BOOL remove)
  * return the command line to carry out. */
 static void resume_begin(char *cmd, int size)
 {
-    char sh[MAX_PATHLEN], self[MAX_PATHLEN + 16];
-    GetProfileString(g_key, "Resume", "", cmd, size);
-    if (GetProfileString(g_key, "ResumeShell", "", sh, sizeof(sh)))
+    char sh[MAX_PATHLEN], self[MAX_PATHLEN + 16], ini[MAX_PATHLEN + 16];
+    BOOL have_sh;
+    wsprintf(ini, "%s%s", (LPSTR)g_src, (LPSTR)RESUME_INI);
+    if (file_exists(ini)) {
+        GetPrivateProfileString("Resume", "Cmd", "", cmd, size, ini);
+        have_sh = GetPrivateProfileString("Resume", "Shell", "", sh, sizeof(sh), ini) > 0;
+        file_delete(ini);
+    } else {        /* a handover started by Setup 0.2.0 or older */
+        GetProfileString(g_key, "Resume", "", cmd, size);
+        have_sh = GetProfileString(g_key, "ResumeShell", "", sh, sizeof(sh)) > 0;
+    }
+    if (have_sh)
         WritePrivateProfileString("boot", "shell", sh, "SYSTEM.INI");
     WriteProfileString(g_key, "Resume", NULL);
     WriteProfileString(g_key, "ResumeShell", NULL);
@@ -1794,8 +1808,10 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     /* the staged copy started from run= after a shell handover */
     stage_dir(t);
     add_slash(t);
+    wsprintf(logp, "%s%s", (LPSTR)g_src, (LPSTR)RESUME_INI);
     if (option(cmd, "RESUME", NULL, 0)
-        || (lstrcmpi(t, g_src) == 0 && GetProfileString(g_key, "Resume", "", logp, sizeof(logp)))) {
+        || (lstrcmpi(t, g_src) == 0 && (file_exists(logp)
+                                         || GetProfileString(g_key, "Resume", "", logp, sizeof(logp))))) {
         resume_begin(rcmd, sizeof(rcmd));
         cmd = rcmd;
         g_resumed = TRUE;
