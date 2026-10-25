@@ -518,9 +518,8 @@ HDDEDATA CALLBACK __export dde_callback(UINT type, UINT fmt, HCONV conv, HSZ s1,
 }
 
 /* Runs Program Manager DDE commands; each one separately, so a failing
- * one (DeleteGroup of a missing group) does not stop the others. The first
- * may_fail commands do not count as errors. */
-static BOOL progman(char (*cmds)[200], int n, int may_fail)
+ * one (DeleteGroup of a missing group) does not stop the others. */
+static BOOL progman(char (*cmds)[200], int n)
 {
     DWORD inst = 0;
     FARPROC cb;
@@ -540,7 +539,7 @@ static BOOL progman(char (*cmds)[200], int n, int may_fail)
         for (i = 0; i < n; i++) {
             HDDEDATA r = DdeClientTransaction((LPVOID)cmds[i], lstrlen(cmds[i]) + 1, conv, NULL, CF_TEXT,
                                              XTYP_EXECUTE, 10000, NULL);
-            if (!r && i >= may_fail)
+            if (!r && i > 0)    /* the first command may fail (DeleteGroup) */
                 ok = FALSE;
             log_line(cmds[i]);
         }
@@ -552,52 +551,29 @@ static BOOL progman(char (*cmds)[200], int n, int may_fail)
     return ok;
 }
 
-#define MAX_OLD_GROUPS 4
-
-/* DeleteGroup commands for the group and the groups that earlier versions
- * created under other names ([Group] Old=, comma-separated). */
-static int delete_groups(char (*c)[200])
-{
-    char old[MAX_TEXT], *p, *q;
-    int n = 0;
-    wsprintf(c[n++], "[DeleteGroup(%s)]", (LPSTR)g_group);
-    inf_get("Group", "Old", "", old, sizeof(old));
-    for (p = old; *p && n < 1 + MAX_OLD_GROUPS; p = q) {
-        q = p + strcspn(p, ",");
-        if (*q)
-            *q++ = 0;
-        while (*p == ' ')
-            p++;
-        if (*p && lstrcmpi(p, g_group) != 0 && lstrlen(p) < 180)
-            wsprintf(c[n++], "[DeleteGroup(%s)]", (LPSTR)p);
-    }
-    return n;
-}
-
 /* [Group]: Name= and items 1=command line,title[,icon file[,icon index]]. */
 static BOOL make_group(void)
 {
-    static char c[1 + MAX_OLD_GROUPS + 1 + MAX_GROUP][200];
+    static char c[MAX_GROUP + 2][200];
     char t[MAX_TEXT], e[MAX_TEXT];
-    int i, n, del;
-    n = del = delete_groups(c);
+    int i, n = 0;
+    wsprintf(c[n++], "[DeleteGroup(%s)]", (LPSTR)g_group);
     wsprintf(c[n++], "[CreateGroup(%s)]", (LPSTR)g_group);
-    for (i = 1; n < del + 1 + MAX_GROUP && inf_entry("Group", i, t, sizeof(t)); i++) {
+    for (i = 1; n < MAX_GROUP + 2 && inf_entry("Group", i, t, sizeof(t)); i++) {
         expand(t, e, sizeof(e), NULL);
         if (lstrlen(e) < 180)
             wsprintf(c[n++], "[AddItem(%s)]", (LPSTR)e);
     }
-    return progman(c, n, del);
+    return progman(c, n);
 }
 
 static void remove_group(void)
 {
-    static char c[1 + MAX_OLD_GROUPS][200];
-    int n;
+    static char c[1][200];
     if (!g_group[0])
         return;
-    n = delete_groups(c);
-    progman(c, n, n);
+    wsprintf(c[0], "[DeleteGroup(%s)]", (LPSTR)g_group);
+    progman(c, 1);
 }
 
 /* ---- running programs --------------------------------------------------- */
