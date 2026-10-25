@@ -48,6 +48,7 @@ example: $(O)/SETUP.EXE $(O)/HELLO.EXE
 	mkdir -p $(O)/example/files/GREET
 	cp $(O)/HELLO.EXE $(O)/example/files/
 	sed "s/$$/\r/" example/README.TXT > $(O)/example/files/README.TXT
+	sed "s/$$/\r/" LICENSE > $(O)/example/files/COPYING.TXT
 	cp example/GREET/*.INI $(O)/example/files/GREET/
 	python3 tools/w16pack.py pack --inf example/SETUP.INF --files $(O)/example/files --setup $(O)/SETUP.EXE \
 		--out $(O)/example --name hello-1.0 --label HELLO

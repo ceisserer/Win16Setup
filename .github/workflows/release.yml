@@ -32,7 +32,7 @@ jobs:
           V=$(cat VERSION)
           d=build/win16setup-$V
           mkdir -p $d/example
-          cp build/SETUP.EXE tools/w16pack.py README.md $d/
+          cp build/SETUP.EXE tools/w16pack.py README.md LICENSE $d/
           cp -r example/SETUP.INF example/README.TXT example/hello.c example/GREET $d/example/
           (cd build && zip -qr9X win16setup-$V.zip win16setup-$V)
           cp build/example/hello-1.0.zip build/hello-example.zip

@@ -148,3 +148,8 @@ Pillow for preview images. GitHub Actions builds both on every push and publishe
 ## Used by
 
 * [Retheme16](https://github.com/ceisserer/win31_theme_engine): the Windows 95 look for Windows 3.1
+
+## License
+
+Win16Setup is free software under the GNU General Public License, version 3 or (at your option) any later version;
+see [LICENSE](LICENSE). Packages made with it may ship `SETUP.EXE` for any product.
