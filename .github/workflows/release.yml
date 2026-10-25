@@ -1,0 +1,42 @@
+name: release
+
+# A pushed tag vX.Y.Z (matching VERSION) publishes SETUP.EXE, the packer and
+# the example package as a GitHub release; 0.x as pre-release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag against VERSION
+        run: test "${GITHUB_REF_NAME#v}" = "$(cat VERSION)"
+      - name: Install Open Watcom 2.0, mtools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mtools
+          curl -sSL -o ow.tar.xz https://github.com/open-watcom/open-watcom-v2/releases/download/Current-build/ow-snapshot.tar.xz
+          sudo mkdir -p /opt/watcom
+          sudo tar xJf ow.tar.xz -C /opt/watcom
+      - name: Build
+        run: make example WATCOM=/opt/watcom
+      - name: Package and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(cat VERSION)
+          d=build/win16setup-$V
+          mkdir -p $d/example
+          cp build/SETUP.EXE tools/w16pack.py README.md $d/
+          cp -r example/SETUP.INF example/README.TXT example/hello.c example/GREET $d/example/
+          (cd build && zip -qr9X win16setup-$V.zip win16setup-$V)
+          cp build/example/hello-1.0.zip build/hello-example.zip
+          (cd build && sha256sum win16setup-$V.zip SETUP.EXE hello-example.zip > SHA256SUMS)
+          case "$V" in 0.*) pre=--prerelease ;; *) pre= ;; esac
+          gh release create "$GITHUB_REF_NAME" $pre --title "Win16Setup $V" --generate-notes \
+            build/win16setup-$V.zip build/SETUP.EXE build/hello-example.zip build/SHA256SUMS

@@ -1,0 +1,36 @@
+/* setup.rc - dialogs and icon of SETUP.EXE. The main dialog is laid out
+ * again at run time: SETUP.INF decides which controls are shown, and the
+ * preview is sized in pixels. The Makefile copies the icon (ICON=) next
+ * to the compiled resources, which wrc searches first. */
+#include <windows.h>
+#include "setup.h"
+
+IDI_SETUP ICON setup.ico
+
+IDD_MAIN DIALOG 0, 0, 400, 180
+STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Setup"
+FONT 8, "MS Sans Serif"
+BEGIN
+    LTEXT           "", IDC_INTRO, 8, 8, 132, 56
+    LTEXT           "Install &to:", IDC_DIRLABEL, 8, 68, 132, 8
+    EDITTEXT        IDC_DIR, 8, 78, 132, 12, ES_AUTOHSCROLL | ES_UPPERCASE | WS_TABSTOP
+    LTEXT           "", IDC_CHOICELABEL, 8, 96, 132, 8
+    COMBOBOX        IDC_CHOICE, 8, 106, 132, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "", IDC_LOAD, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 8, 126, 132, 10
+    CONTROL         "", IDC_GROUP, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 8, 138, 132, 10
+    CONTROL         "", IDC_START, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 8, 150, 132, 10
+    CONTROL         "", IDC_PREVIEW, "W16Preview", WS_CHILD | WS_VISIBLE, 148, 8, 244, 140
+    DEFPUSHBUTTON   "&Install", IDOK, 220, 158, 54, 14, WS_TABSTOP
+    PUSHBUTTON      "&Remove", IDC_REMOVE, 279, 158, 54, 14, WS_TABSTOP | WS_DISABLED
+    PUSHBUTTON      "Cancel", IDCANCEL, 338, 158, 54, 14, WS_TABSTOP
+END
+
+IDD_PROGRESS DIALOG 0, 0, 200, 50
+STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION
+CAPTION "Setup"
+FONT 8, "MS Sans Serif"
+BEGIN
+    LTEXT           "", IDC_STATUS, 8, 8, 184, 8
+    CONTROL         "", IDC_GAUGE, "W16Gauge", WS_CHILD | WS_VISIBLE, 8, 22, 184, 14
+END

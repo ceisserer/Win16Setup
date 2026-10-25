@@ -1,0 +1,7 @@
+# wlink directives for SETUP.EXE (see Makefile). Module name W16SETUP: see
+# setup.c on removing an installation.
+system windows
+option modname=W16SETUP
+option description 'Win16Setup'
+option stack=12k, heapsize=4k
+library ddeml

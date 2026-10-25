@@ -1,0 +1,41 @@
+; SETUP.INF of the example product (see README.md). tools/w16pack.py adds
+; the [Files] section when packaging.
+
+[Setup]
+Product=Hello
+Version=1.0
+DefaultDir=C:\HELLO
+Tagline=The Win16Setup example - version %VERSION%
+Welcome=Hello %VERSION% shows a greeting.\n\nSetup copies it into the directory below.
+
+[Choice]
+Label=&Greeting:
+Switch=G
+Default=EN
+NameFrom=GREET\%ITEM%.INI,Greeting,Name
+1=EN
+2=DE
+3=FR
+
+[Ini]
+1=%DIR%\HELLO.INI,Hello,Greeting,%DIR%\GREET\%CHOICE%.INI
+
+[Autostart]
+Program=HELLO.EXE
+Default=0
+
+[Group]
+Name=Hello
+1=%DIR%\HELLO.EXE,Hello
+2=%DIR%\SETUP.EXE,Hello Setup
+3=NOTEPAD.EXE %DIR%\README.TXT,Read Me,NOTEPAD.EXE
+
+[StartNow]
+Program=HELLO.EXE
+
+[Stop]
+Window=Hello
+Wait=HELLO
+
+[Uninstall]
+1=HELLO.INI

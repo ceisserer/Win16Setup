@@ -1,0 +1,28 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Open Watcom 2.0, mtools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mtools
+          curl -sSL -o ow.tar.xz https://github.com/open-watcom/open-watcom-v2/releases/download/Current-build/ow-snapshot.tar.xz
+          sudo mkdir -p /opt/watcom
+          sudo tar xJf ow.tar.xz -C /opt/watcom
+      - name: Build SETUP.EXE and the example package
+        run: make example WATCOM=/opt/watcom
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win16setup
+          path: |
+            build/SETUP.EXE
+            build/SETUP.MAP
+            build/example/*.zip
+            build/example/*.img
