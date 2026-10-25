@@ -8,6 +8,11 @@ your product.
   languages) with preview image, progress bar
 * Copies the files, writes INI entries, adds a program to `WIN.INI` `load=`, creates a Program Manager group (DDE),
   starts the program
+* Optional features as check boxes (`[Options]`): each can change INI entries, also in `SYSTEM.INI` (the old values
+  are restored when the option is turned off or the product removed), add programs to `load=`, start a program
+  and ask for a restart of Windows
+* Products that replace the Windows shell (`SYSTEM.INI` `shell=`) can be updated and removed while they are the
+  running shell: Setup finishes after a restart with Program Manager (shell handover)
 * Stops your running program before replacing files (or asks the user to close it)
 * Silent install (`SETUP /S`) for scripts and networks
 * Running `SETUP.EXE` again (it installs itself) changes the options or removes the product; removal deletes the
@@ -38,12 +43,14 @@ Requirements on the target: Windows 3.1 or WfW 3.11, Standard or 386 Enhanced mo
 
 ```
 SETUP                        install; if installed: change the options or remove
-SETUP /S [/D=dir] [/<switch>=item] [/NOLOAD] [/NOGROUP] [/NOSTART]
+SETUP /S [/D=dir] [/<switch>=item] [/[NO]LOAD] [/[NO]GROUP] [/[NO]START] [/[NO]<option>] [/RESTART]
                              silent install with the defaults or these options
-SETUP /U [/S]                remove (asks first unless /S)
+SETUP /U [/S] [/RESTART]     remove (asks first unless /S)
+SETUP /RESUME                finish a shell handover (the staged copy does this by itself)
 ```
 
-`/<switch>` is the choice's `Switch=` (default `C`). Setup writes `SETUP.LOG` into the installation directory
+`/<switch>` is the choice's `Switch=` (default `C`), `/<option>` and `/NO<option>` an option's `Switch=`.
+`/NOSTART` also keeps the options' `Run=` programs from starting. Silent runs restart Windows only with `/RESTART`. Setup writes `SETUP.LOG` into the installation directory
 (`W16UNINS.LOG` in TEMP when removing, `W16SETUP.LOG` in the Windows directory if the installation directory could
 not be created).
 
@@ -118,9 +125,41 @@ Wait=HELLO,HELLODLL           ; module names to wait for (15 s at most)
 
 [Uninstall]                   ; files the product creates, deleted on removal
 1=HELLO.INI
+
+[Options]                     ; up to 4 optional features: check boxes below the choice
+1=Shell
+2=Look
+
+[Option.Shell]                ; one section per option: [Option.<name>]
+Label=Use %PRODUCT% as the Windows &shell
+Switch=SHELL                  ; SETUP /S /SHELL or /NOSHELL (default: the name)
+Default=1
+Restart=1                     ; offer to restart Windows when the option changes
+Ini1=%WINDIR%\SYSTEM.INI,boot,shell,%DIR%\MYSHELL.EXE   ; file,section,key,value
+Ini2=%WINDIR%\SYSTEM.INI,boot,taskman.exe,%DIR%\MYSHELL.EXE
+
+[Option.Look]
+Label=&Extra look
+Ini1=%DIR%\LOOK\LOOK.INI,Look,Theme,%CHOICE%
+Load=LOOK\LOOK.EXE            ; added to WIN.INI load= (relative to %DIR%)
+Run=LOOK\LOOK.EXE,minimized   ; started after installing
+Window=LookWindow             ; closed when the option is turned off or files are replaced
+Wait=LOOK                     ; modules waited for (as in [Stop])
 ```
 
 The choice is stored in `WIN.INI` `[<Key>]` `Choice=` and is the default when Setup runs again.
+
+**Options:** an option that is on writes its `Ini<n>=` entries. The value an entry had before (or that it was
+missing) is kept in `WIN.INI` `[<Key>]` `Old.<name>.<n>=`; turning the option off, or removing the product, puts it
+back if the entry still has the option's value. The option's state is `Option.<name>=` there.
+
+**Shell handover:** a running shell cannot be stopped (ending it ends Windows), so its files cannot be replaced or
+deleted. If `SYSTEM.INI` `shell=` names a program in the installation directory and it is running, Setup copies
+itself (and, for an installation, the product's files) to `TEMP\W16STAGE`, keeps the chosen options in `WIN.INI`
+`[<Key>]` `Resume=`, makes Program Manager the shell, adds the copy to `WIN.INI` `run=` and restarts Windows. The copy,
+started by Program Manager, puts `shell=` back, finishes the installation or removal and restarts Windows again if
+the product is the shell. `[Running]` entries for the shell's module are skipped. The next run of any Win16Setup
+deletes the staged copy.
 
 **Preview images:** a DIB of at most 64 KB, shown centred in a 320 × 200 area; `tools/w16pack.py preview in.png
 out.bmp` converts a screenshot to an 8-bit BMP. Without `Preview=` the dialog is compact.
@@ -148,6 +187,8 @@ Pillow for preview images. GitHub Actions builds both on every push and publishe
 ## Used by
 
 * [Retheme16](https://github.com/ceisserer/win31_theme_engine): the Windows 95 look for Windows 3.1
+* [NewShell16](https://github.com/ceisserer/NewShell16): a Calmira-style shell for Windows 3.1 (uses `[Options]` and
+  the shell handover, and bundles Retheme16)
 
 ## License
 

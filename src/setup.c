@@ -1393,9 +1393,13 @@ static void resume_args(char *cmd, BOOL remove)
 static BOOL handover(BOOL remove)
 {
     char stage[MAX_PATHLEN], t[MAX_TEXT], cmd[MAX_TEXT], sh[MAX_PATHLEN];
-    wsprintf(t, "%s is the Windows shell and cannot be %s while it runs.\r\n\r\nSetup will restart "
-                "Windows with Program Manager, finish there and then restart Windows once more.",
-             (LPSTR)g_product, (LPSTR)(remove ? "removed" : "updated"));
+    if (remove)
+        wsprintf(t, "%s is the Windows shell and cannot be removed while it runs.\r\n\r\nSetup will "
+                    "restart Windows with Program Manager and finish there.", (LPSTR)g_product);
+    else
+        wsprintf(t, "%s is the Windows shell and cannot be updated while it runs.\r\n\r\nSetup will "
+                    "restart Windows with Program Manager, finish there and then restart Windows once more.",
+                 (LPSTR)g_product);
     log_line("shell handover");
     if (!g_silent && MessageBox(g_back, t, g_title, MB_OKCANCEL | MB_ICONINFORMATION) != IDOK)
         return FALSE;
