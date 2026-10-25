@@ -107,6 +107,7 @@ Default=1
 Name=Hello
 1=%DIR%\HELLO.EXE,Hello       ; AddItem: command line,title[,icon file[,icon index]]
 2=NOTEPAD.EXE %DIR%\README.TXT,Read Me,NOTEPAD.EXE
+Old=Hello 1.x                 ; groups earlier versions created under other names: deleted too
 Label=Create a Program Manager &group
 Default=1
 
