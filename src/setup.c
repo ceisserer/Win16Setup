@@ -4,9 +4,12 @@
  * SETUP.EXE (see README.md for the format).
  *
  *   SETUP                     install; if installed: change options or remove
- *   SETUP /S [/D=dir] [/<switch>=item] [/NOLOAD] [/NOGROUP] [/NOSTART]
+ *   SETUP /S [/D=dir] [/<switch>=item] [/[NO]LOAD] [/[NO]GROUP] [/[NO]START]
+ *         [/[NO]<option>] [/RESTART]
  *                             silent install with defaults or these options
  *   SETUP /U [/S]             remove (asks first unless /S)
+ *   SETUP /RESUME             finish a shell handover (the staged copy in
+ *                             TEMP\W16STAGE does so by itself)
  *
  * Installing: stop the product's running programs ([Stop]), copy [Files],
  * write [Ini] entries, add the [Autostart] program to WIN.INI load=,
@@ -14,6 +17,18 @@
  * and SETUP.INF are installed too, for changing options and removing; the
  * installation is recorded in WIN.INI [<product>] (InstallDir, Version,
  * Choice).
+ *
+ * [Options] adds check boxes for optional features. Each one can change INI
+ * entries (also in SYSTEM.INI; the old values are kept in WIN.INI and put
+ * back when the option is turned off or the product removed), add programs
+ * to load=, start a program and ask for a restart of Windows.
+ *
+ * Shell handover: a product that is the running Windows shell (SYSTEM.INI
+ * shell= in the installation directory) cannot be stopped - ending the
+ * shell ends Windows. To replace or remove its files Setup copies itself
+ * to TEMP\W16STAGE, makes Program Manager the shell, adds the copy to
+ * WIN.INI run= (its command line is kept in WIN.INI) and restarts Windows; the resumed Setup puts
+ * shell= back, does the work and restarts Windows again if needed.
  *
  * Removing with the installed copy: a running EXE cannot delete itself, so
  * SETUP copies itself to the TEMP directory under another module name
@@ -35,11 +50,22 @@
 #define MAX_FILES   128
 #define MAX_ITEMS   16
 #define MAX_GROUP   12
+#define MAX_OPTIONS 4
 #define MAX_PATHLEN 144
 #define MAX_TEXT    300
 
 #define MODNAME     "W16SETUP"
 #define MODNAME_TMP "W16UNINS"
+#define STAGE_DIR   "W16STAGE"
+
+/* an [Options] entry: section [Option.<name>] */
+typedef struct {
+    char name[16];
+    char sw[12];                    /* command line switch (/SW, /NOSW) */
+    BOOL on;                        /* chosen */
+    BOOL was_on;                    /* recorded in WIN.INI [<key>] */
+    BOOL restart;                   /* changing it needs a restart of Windows */
+} OptionDef;
 
 typedef struct {
     char dir[MAX_PATHLEN];          /* without trailing '\' */
@@ -65,6 +91,13 @@ static char g_auto[64];             /* [Autostart] Program= */
 static char g_group[40];            /* [Group] Name= */
 static char g_run[64];              /* [StartNow] Program= */
 static BOOL g_silent;
+static BOOL g_nostart;              /* /NOSTART: start no programs */
+static BOOL g_resumed;              /* second half of a shell handover */
+static BOOL g_need_restart;         /* an option needing a restart changed */
+static BOOL g_restart_now;          /* restart Windows when Setup ends */
+static BOOL g_cmd_restart;          /* /RESTART: silent installs may restart */
+static OptionDef g_opts[MAX_OPTIONS];
+static int  g_nopts;
 static BOOL g_installed;            /* WIN.INI [<key>] InstallDir= exists */
 static Options g_opt;
 static HWND g_back;                 /* blue background window */
@@ -362,6 +395,17 @@ static BOOL load_inf(void)
         }
         g_nitems++;
     }
+    g_nopts = 0;
+    for (i = 1; g_nopts < MAX_OPTIONS && inf_entry("Options", i, t, sizeof(t)); i++) {
+        OptionDef *o = &g_opts[g_nopts++];
+        char sec[32];
+        _fmemset(o, 0, sizeof(*o));
+        lstrcpyn(o->name, t, sizeof(o->name));
+        wsprintf(sec, "Option.%s", (LPSTR)o->name);
+        inf_get(sec, "Switch", o->name, o->sw, sizeof(o->sw));
+        AnsiUpper(o->sw);
+        o->restart = GetPrivateProfileInt(sec, "Restart", 0, g_inf) != 0;
+    }
     inf_get("Autostart", "Program", "", g_auto, sizeof(g_auto));
     inf_get("Group", "Name", "", g_group, sizeof(g_group));
     inf_get("StartNow", "Program", "", g_run, sizeof(g_run));
@@ -379,16 +423,28 @@ static int item_index(const char *name)
 
 /* ---- WIN.INI ------------------------------------------------------------ */
 
-/* Rewrites [windows] load= without any entry for the program named like
- * g_auto, then adds exe if given. Returns whether an entry was there. */
-static BOOL edit_load(const char *exe)
+/* Whether a list entry is the program: a match containing '\\' must be
+ * the same path, otherwise the file names are compared. */
+static BOOL same_program(const char *tok, const char *match)
 {
-    char cur[256], out[256], tok[128], prog[64];
+    char a[128], b[128];
+    lstrcpyn(a, tok, sizeof(a));
+    lstrcpyn(b, match, sizeof(b));
+    if (_fstrchr(b, '\\'))
+        return lstrcmpi(a, b) == 0;
+    return lstrcmpi(base_name(a), base_name(b)) == 0;
+}
+
+/* Rewrites a program list of WIN.INI [windows] (load=, run=) without the
+ * entries for match, then adds add if given. Returns whether an entry was
+ * there. */
+static BOOL edit_list(LPCSTR key, const char *match, const char *add)
+{
+    char cur[256], out[256], tok[128];
     const char *p;
     int n;
     BOOL found = FALSE;
-    lstrcpy(prog, g_auto);
-    GetProfileString("windows", "load", "", cur, sizeof(cur));
+    GetProfileString("windows", key, "", cur, sizeof(cur));
     out[0] = 0;
     for (p = cur; *p;) {
         while (*p == ' ' || *p == ',' || *p == '\t')
@@ -399,7 +455,7 @@ static BOOL edit_load(const char *exe)
         tok[n] = 0;
         if (!n)
             continue;
-        if (prog[0] && lstrcmpi(base_name(tok), base_name(prog)) == 0) {
+        if (match && match[0] && same_program(tok, match)) {
             found = TRUE;
             continue;
         }
@@ -409,24 +465,24 @@ static BOOL edit_load(const char *exe)
             lstrcat(out, tok);
         }
     }
-    if (exe && lstrlen(out) + lstrlen(exe) + 2 < sizeof(out)) {
+    if (add && lstrlen(out) + lstrlen(add) + 2 < sizeof(out)) {
         if (out[0])
             lstrcat(out, " ");
-        lstrcat(out, exe);
+        lstrcat(out, add);
     }
-    if (exe || found)
-        WriteProfileString("windows", "load", out);
+    if (add || found)
+        WriteProfileString("windows", key, out);
     return found;
 }
 
-static BOOL load_has_program(void)
+static BOOL list_has(LPCSTR key, const char *match)
 {
     char cur[256], tok[128];
     const char *p;
     int n;
-    if (!g_auto[0])
+    if (!match || !match[0])
         return FALSE;
-    GetProfileString("windows", "load", "", cur, sizeof(cur));
+    GetProfileString("windows", key, "", cur, sizeof(cur));
     for (p = cur; *p;) {
         while (*p == ' ' || *p == ',' || *p == '\t')
             p++;
@@ -434,10 +490,21 @@ static BOOL load_has_program(void)
             if (n < sizeof(tok) - 1)
                 tok[n++] = *p;
         tok[n] = 0;
-        if (n && lstrcmpi(base_name(tok), base_name(g_auto)) == 0)
+        if (n && same_program(tok, match))
             return TRUE;
     }
     return FALSE;
+}
+
+/* [Autostart]: load= without the program, plus exe if given */
+static BOOL edit_load(const char *exe)
+{
+    return edit_list("load", g_auto, exe);
+}
+
+static BOOL load_has_program(void)
+{
+    return list_has("load", g_auto);
 }
 
 /* ---- Program Manager ---------------------------------------------------- */
@@ -527,19 +594,42 @@ static BOOL modules_loaded(const char *list)
     return FALSE;
 }
 
-/* [Stop] Window=class (sent WM_CLOSE), Wait=modules (waited for); [Running]
- * 1=module,name: programs the user has to close. */
-static BOOL check_running(void)
+/* The module of the product that is the running Windows shell: SYSTEM.INI
+ * shell= names a program in the installation directory and it is loaded. */
+static BOOL shell_module(char *module)
 {
-    char cls[64], wait[MAX_TEXT], t[MAX_TEXT], m[MAX_TEXT], *name;
+    char sh[MAX_PATHLEN], dir[MAX_PATHLEN], *p, *b;
+    GetPrivateProfileString("boot", "shell", "", sh, sizeof(sh), "SYSTEM.INI");
+    for (p = sh; *p && *p != ' '; p++)
+        ;
+    *p = 0;
+    b = base_name(sh);
+    if (b == sh)
+        return FALSE;
+    lstrcpyn(module, b, 9);
+    p = _fstrchr(module, '.');
+    if (p)
+        *p = 0;
+    b[-1] = 0;
+    lstrcpy(dir, g_opt.dir);
+    cut_slash(dir);
+    cut_slash(sh);
+    if (lstrcmpi(sh, dir) != 0)
+        return FALSE;
+    return GetModuleHandle(module) != NULL;
+}
+
+/* Window=class (sent WM_CLOSE), Wait=modules (waited for) of a section. */
+static BOOL stop_programs(LPCSTR section)
+{
+    char cls[64], wait[MAX_TEXT], m[MAX_TEXT];
     HWND w;
     DWORD t0 = GetTickCount();
-    int i;
-    inf_get("Stop", "Window", "", cls, sizeof(cls));
-    inf_get("Stop", "Wait", "", wait, sizeof(wait));
+    inf_get(section, "Window", "", cls, sizeof(cls));
+    inf_get(section, "Wait", "", wait, sizeof(wait));
     w = cls[0] ? FindWindow(cls, NULL) : NULL;
     if (w || modules_loaded(wait)) {
-        log_line("stopping the running program");
+        log_line("stopping a running program");
         if (w)
             PostMessage(w, WM_CLOSE, 0, 0);
         while ((cls[0] && FindWindow(cls, NULL)) || modules_loaded(wait)) {
@@ -551,12 +641,33 @@ static BOOL check_running(void)
             pump();
         }
     }
+    return TRUE;
+}
+
+/* [Stop] and the options' Window=/Wait=; [Running] 1=module,name: programs
+ * the user has to close (except the product running as the shell, which is
+ * dealt with by the shell handover). */
+static BOOL check_running(void)
+{
+    char t[MAX_TEXT], m[MAX_TEXT], sec[32], shell[16], *name;
+    int i;
+    if (!stop_programs("Stop"))
+        return FALSE;
+    for (i = 0; i < g_nopts; i++) {
+        wsprintf(sec, "Option.%s", (LPSTR)g_opts[i].name);
+        if (!stop_programs(sec))
+            return FALSE;
+    }
+    if (!shell_module(shell))
+        shell[0] = 0;
     for (i = 1; inf_entry("Running", i, t, sizeof(t)); i++) {
         name = _fstrchr(t, ',');
         if (name)
             *name++ = 0;
         else
             name = t;
+        if (shell[0] && lstrcmpi(t, shell) == 0)
+            continue;
         if (GetModuleHandle(t)) {
             wsprintf(m, "Please close %s and run Setup again.", (LPSTR)name);
             say(m, MB_ICONSTOP);
@@ -880,7 +991,7 @@ static void fit_text(HWND dlg, int id)
  * plus frame) on the right if there is one, the buttons below. */
 static void layout(HWND dlg)
 {
-    static const int checks[] = { IDC_LOAD, IDC_GROUP, IDC_START };
+    static const int checks[] = { IDC_OPT1, IDC_OPT2, IDC_OPT3, IDC_OPT4, IDC_LOAD, IDC_GROUP, IDC_START };
     RECT m, intro, btn, wr;
     int x, y, top, i, right, bottom, bw, bh, by, pw = 324, ph = 204;
     BOOL preview = g_preview[0] && g_nitems > 0;
@@ -900,7 +1011,7 @@ static void layout(HWND dlg)
         stack(dlg, IDC_CHOICELABEL, x, &y, 2);
         stack(dlg, IDC_CHOICE, x, &y, m.bottom);
     }
-    for (i = 0; i < 3; i++)     /* the dialog itself is not visible yet */
+    for (i = 0; i < sizeof(checks) / sizeof(checks[0]); i++)   /* the dialog is not visible yet */
         if (GetWindowLong(GetDlgItem(dlg, checks[i]), GWL_STYLE) & WS_VISIBLE)
             stack(dlg, checks[i], x, &y, 2);
     right = intro.right;
@@ -980,6 +1091,13 @@ BOOL CALLBACK __export MainProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         }
         if (!g_preview[0] || !g_nitems)
             ShowWindow(GetDlgItem(dlg, IDC_PREVIEW), SW_HIDE);
+        for (i = 0; i < MAX_OPTIONS; i++) {
+            char sec[32];
+            if (i < g_nopts)
+                wsprintf(sec, "Option.%s", (LPSTR)g_opts[i].name);
+            feature(dlg, IDC_OPT1 + i, i < g_nopts, sec, i < g_nopts ? g_opts[i].name : "",
+                    i < g_nopts && g_opts[i].on);
+        }
         feature(dlg, IDC_LOAD, g_auto[0] != 0, "Autostart", "Start %PRODUCT% with &Windows", g_opt.load);
         feature(dlg, IDC_GROUP, g_group[0] != 0, "Group", "Create a Program Manager &group", g_opt.group);
         feature(dlg, IDC_START, g_run[0] != 0, "StartNow", "Start %PRODUCT% &now", g_opt.start);
@@ -1011,6 +1129,8 @@ BOOL CALLBACK __export MainProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             g_opt.load = g_auto[0] && IsDlgButtonChecked(dlg, IDC_LOAD);
             g_opt.group = g_group[0] && IsDlgButtonChecked(dlg, IDC_GROUP);
             g_opt.start = g_run[0] && IsDlgButtonChecked(dlg, IDC_START);
+            for (i = 0; i < g_nopts; i++)
+                g_opts[i].on = IsDlgButtonChecked(dlg, IDC_OPT1 + i) != 0;
             EndDialog(dlg, IDOK);
             return TRUE;
         case IDC_REMOVE:
@@ -1047,6 +1167,270 @@ static void write_ini(void)
     }
 }
 
+/* ---- options ---------------------------------------------------------- */
+
+/* Splits an expanded "file,section,key,value" in place. */
+static BOOL split_ini(char *e, char **sec, char **key, char **val)
+{
+    *sec = _fstrchr(e, ',');
+    *key = *sec ? _fstrchr(*sec + 1, ',') : NULL;
+    *val = *key ? _fstrchr(*key + 1, ',') : NULL;
+    if (!*val)
+        return FALSE;
+    *(*sec)++ = *(*key)++ = *(*val)++ = 0;
+    return TRUE;
+}
+
+/* "prog[,minimized]" relative to the installation directory: full path */
+static void option_program(LPCSTR section, LPCSTR key, char *path, char *extra)
+{
+    char t[MAX_TEXT], e[MAX_TEXT], *c;
+    path[0] = 0;
+    if (extra)
+        extra[0] = 0;
+    if (!inf_get(section, key, "", t, sizeof(t)))
+        return;
+    expand(t, e, sizeof(e), NULL);
+    c = _fstrchr(e, ',');
+    if (c) {
+        *c++ = 0;
+        if (extra)
+            lstrcpyn(extra, c, 16);
+    }
+    if (e[0] && e[1] != ':' && e[0] != '\\')
+        wsprintf(path, "%s\\%s", (LPSTR)g_opt.dir, (LPSTR)e);
+    else
+        lstrcpy(path, e);
+}
+
+/* Turns an option on: its IniN= entries are written (the old values are
+ * kept in WIN.INI [<key>] Old.<name>.<n>, '>' + value or '*' for none),
+ * its Load= program is added to load=. */
+static void option_apply(OptionDef *o)
+{
+    char sec[32], ik[8], ok[40], t[MAX_TEXT], e[MAX_TEXT], cur[MAX_TEXT], saved[MAX_TEXT + 2];
+    char *s, *k, *v;
+    int n;
+    wsprintf(sec, "Option.%s", (LPSTR)o->name);
+    for (n = 1;; n++) {
+        wsprintf(ik, "Ini%d", n);
+        if (!inf_get(sec, ik, "", t, sizeof(t)))
+            break;
+        expand(t, e, sizeof(e), NULL);
+        if (!split_ini(e, &s, &k, &v))
+            continue;
+        wsprintf(ok, "Old.%s.%d", (LPSTR)o->name, n);
+        if (!GetProfileString(g_key, ok, "", saved, sizeof(saved))) {
+            if (GetPrivateProfileString(s, k, "\1", cur, sizeof(cur), e) == 1 && cur[0] == 1)
+                lstrcpy(saved, "*");
+            else
+                wsprintf(saved, ">%s", (LPSTR)cur);
+            WriteProfileString(g_key, ok, saved);
+        }
+        WritePrivateProfileString(s, k, v, e);
+        wsprintf(t, "option %s: %s [%s] %s=%s", (LPSTR)o->name, (LPSTR)e, (LPSTR)s, (LPSTR)k, (LPSTR)v);
+        log_line(t);
+    }
+    option_program(sec, "Load", t, NULL);
+    if (t[0])
+        edit_list("load", t, t);
+}
+
+/* Turns an option off (or removes it): entries still holding our value get
+ * their old value back, the Load= program leaves load=. */
+static void option_revert(OptionDef *o)
+{
+    char sec[32], ik[8], ok[40], t[MAX_TEXT], e[MAX_TEXT], cur[MAX_TEXT], saved[MAX_TEXT + 2];
+    char *s, *k, *v;
+    int n;
+    wsprintf(sec, "Option.%s", (LPSTR)o->name);
+    for (n = 1;; n++) {
+        wsprintf(ik, "Ini%d", n);
+        if (!inf_get(sec, ik, "", t, sizeof(t)))
+            break;
+        expand(t, e, sizeof(e), NULL);
+        if (!split_ini(e, &s, &k, &v))
+            continue;
+        wsprintf(ok, "Old.%s.%d", (LPSTR)o->name, n);
+        GetProfileString(g_key, ok, "", saved, sizeof(saved));
+        GetPrivateProfileString(s, k, "", cur, sizeof(cur), e);
+        if (saved[0] && lstrcmpi(cur, v) == 0) {
+            WritePrivateProfileString(s, k, saved[0] == '>' ? saved + 1 : NULL, e);
+            wsprintf(t, "option %s: %s [%s] %s restored", (LPSTR)o->name, (LPSTR)e, (LPSTR)s, (LPSTR)k);
+        } else {
+            wsprintf(t, "option %s: %s [%s] %s changed meanwhile, left", (LPSTR)o->name, (LPSTR)e, (LPSTR)s,
+                     (LPSTR)k);
+        }
+        log_line(t);
+        WriteProfileString(g_key, ok, NULL);
+    }
+    option_program(sec, "Load", t, NULL);
+    if (t[0])
+        edit_list("load", t, NULL);
+}
+
+/* Applies the chosen options and records them in WIN.INI [<key>]. */
+static void apply_options(void)
+{
+    char ok[40];
+    int i;
+    for (i = 0; i < g_nopts; i++) {
+        OptionDef *o = &g_opts[i];
+        if (o->on)
+            option_apply(o);
+        else if (o->was_on)
+            option_revert(o);
+        wsprintf(ok, "Option.%s", (LPSTR)o->name);
+        WriteProfileString(g_key, ok, o->on ? "1" : "0");
+        if (o->restart && o->on != o->was_on)
+            g_need_restart = TRUE;
+    }
+}
+
+/* Starts the Run= programs of the options that are on. */
+static void run_options(void)
+{
+    char sec[32], path[MAX_PATHLEN + 64], show[16], t[MAX_TEXT];
+    UINT rc;
+    int i;
+    if (g_nostart)
+        return;
+    for (i = 0; i < g_nopts; i++) {
+        if (!g_opts[i].on)
+            continue;
+        wsprintf(sec, "Option.%s", (LPSTR)g_opts[i].name);
+        option_program(sec, "Run", path, show);
+        if (!path[0])
+            continue;
+        rc = WinExec(path, lstrcmpi(show, "minimized") == 0 ? SW_SHOWMINNOACTIVE : SW_SHOWNORMAL);
+        wsprintf(t, "started %s (%u)", (LPSTR)path, rc);
+        log_line(t);
+    }
+}
+
+/* Asks to restart Windows if an option that needs it changed (silent: only
+ * with /RESTART). The restart happens when Setup ends. */
+static void offer_restart(void)
+{
+    if (!g_need_restart || g_resumed)
+        return;
+    if (g_silent ? !g_cmd_restart
+                 : MessageBox(g_back, "Windows must be restarted for the changes to take effect.\r\n\r\n"
+                              "Restart Windows now?", g_title, MB_YESNO | MB_ICONQUESTION) != IDYES) {
+        log_line("restart of Windows postponed");
+        return;
+    }
+    log_line("restarting Windows");
+    g_restart_now = TRUE;
+}
+
+/* ---- shell handover --------------------------------------------------- */
+
+static void stage_dir(char *out)
+{
+    GetTempFileName(GetTempDrive(0), "W16", 0, out);
+    file_delete(out);
+    lstrcpy(base_name(out), STAGE_DIR);
+}
+
+/* Copies SETUP.EXE, SETUP.INF and (all) the product's files to the stage
+ * directory. */
+static BOOL stage_copy(const char *stage, BOOL all)
+{
+    static const char *own[] = { "SETUP.EXE", "SETUP.INF" };
+    char from[MAX_PATHLEN + 64], to[MAX_PATHLEN + 64], t[MAX_TEXT];
+    int i, total = all ? g_nfiles + 2 : 2;
+    progress_open();
+    for (i = 0; i < total; i++) {
+        LPCSTR rel = i < 2 ? own[i] : g_files[i - 2];
+        wsprintf(from, "%s%s", (LPSTR)g_src, (LPSTR)rel);
+        wsprintf(to, "%s\\%s", (LPSTR)stage, (LPSTR)rel);
+        wsprintf(t, "Preparing %s", (LPSTR)rel);
+        progress(i * 100 / total, t);
+        make_dirs(to);
+        if (!copy_file(from, to)) {
+            progress_close();
+            log_line(to);
+            return FALSE;
+        }
+    }
+    progress_close();
+    return TRUE;
+}
+
+/* The command line that repeats the chosen installation. */
+static void resume_args(char *cmd, BOOL remove)
+{
+    char t[64];
+    int i;
+    if (remove) {
+        lstrcpy(cmd, "/U");
+    } else {
+        wsprintf(cmd, "/D=%s", (LPSTR)g_opt.dir);
+        if (g_nitems && g_opt.choice[0]) {
+            wsprintf(t, " /%s=%s", (LPSTR)g_switch, (LPSTR)g_opt.choice);
+            lstrcat(cmd, t);
+        }
+        for (i = 0; i < g_nopts; i++) {
+            wsprintf(t, g_opts[i].on ? " /%s" : " /NO%s", (LPSTR)g_opts[i].sw);
+            lstrcat(cmd, t);
+        }
+        if (g_auto[0])
+            lstrcat(cmd, g_opt.load ? " /LOAD" : " /NOLOAD");
+        if (g_group[0])
+            lstrcat(cmd, g_opt.group ? " /GROUP" : " /NOGROUP");
+        if (g_run[0])
+            lstrcat(cmd, g_opt.start ? " /START" : " /NOSTART");
+    }
+    if (g_silent)
+        lstrcat(cmd, " /S");
+}
+
+/* The product is the running shell: continue after a restart of Windows
+ * with Program Manager as the shell. */
+static BOOL handover(BOOL remove)
+{
+    char stage[MAX_PATHLEN], t[MAX_TEXT], cmd[MAX_TEXT], sh[MAX_PATHLEN];
+    wsprintf(t, "%s is the Windows shell and cannot be %s while it runs.\r\n\r\nSetup will restart "
+                "Windows with Program Manager, finish there and then restart Windows once more.",
+             (LPSTR)g_product, (LPSTR)(remove ? "removed" : "updated"));
+    log_line("shell handover");
+    if (!g_silent && MessageBox(g_back, t, g_title, MB_OKCANCEL | MB_ICONINFORMATION) != IDOK)
+        return FALSE;
+    stage_dir(stage);
+    if (lstrcmpi(stage, g_opt.dir) == 0 || !stage_copy(stage, !remove)) {
+        say("Setup could not copy itself to the TEMP directory and cannot continue.", MB_ICONSTOP);
+        return FALSE;
+    }
+    resume_args(cmd, remove);
+    WriteProfileString(g_key, "Resume", cmd);
+    GetPrivateProfileString("boot", "shell", "progman.exe", sh, sizeof(sh), "SYSTEM.INI");
+    WriteProfileString(g_key, "ResumeShell", sh);
+    WritePrivateProfileString("boot", "shell", "progman.exe", "SYSTEM.INI");
+    /* run= takes no arguments: the staged copy finds Resume= in WIN.INI */
+    wsprintf(t, "%s\\SETUP.EXE", (LPSTR)stage);
+    edit_list("run", t, t);
+    log_line(t);
+    g_restart_now = TRUE;
+    return TRUE;
+}
+
+/* The first thing a resumed Setup does: undo the handover's changes and
+ * return the command line to carry out. */
+static void resume_begin(char *cmd, int size)
+{
+    char sh[MAX_PATHLEN], self[MAX_PATHLEN + 16];
+    GetProfileString(g_key, "Resume", "", cmd, size);
+    if (GetProfileString(g_key, "ResumeShell", "", sh, sizeof(sh)))
+        WritePrivateProfileString("boot", "shell", sh, "SYSTEM.INI");
+    WriteProfileString(g_key, "Resume", NULL);
+    WriteProfileString(g_key, "ResumeShell", NULL);
+    wsprintf(self, "%sSETUP.EXE", (LPSTR)g_src);
+    edit_list("run", self, NULL);
+    log_line("resuming after the shell handover");
+    log_line(cmd);
+}
+
 static BOOL install(void)
 {
     char dir[MAX_PATHLEN], from[MAX_PATHLEN + 64], to[MAX_PATHLEN + 64], t[MAX_TEXT];
@@ -1061,10 +1445,12 @@ static BOOL install(void)
     wsprintf(t, "install %s %s to %s, choice %s, load %d, group %d, start %d", (LPSTR)g_product, (LPSTR)g_ver,
              (LPSTR)dir, (LPSTR)g_opt.choice, g_opt.load, g_opt.group, g_opt.start);
     log_line(t);
+    same = lstrcmpi(dir, g_src) == 0;
+    if (!same && shell_module(t))
+        return handover(FALSE);
     if (!check_running())
         return FALSE;
 
-    same = lstrcmpi(dir, g_src) == 0;
     total = g_nfiles + 2;
     if (!same) {
         for (i = 0; i < total; i++) {
@@ -1111,6 +1497,7 @@ static BOOL install(void)
     WriteProfileString(g_key, "InstallDir", g_opt.dir);
     WriteProfileString(g_key, "Version", g_ver);
     WriteProfileString(g_key, "Choice", g_opt.choice[0] ? g_opt.choice : NULL);
+    apply_options();
     if (g_auto[0]) {
         wsprintf(t, "%s%s", (LPSTR)dir, (LPSTR)g_auto);
         edit_load(g_opt.load ? t : NULL);
@@ -1127,6 +1514,7 @@ static BOOL install(void)
     }
     progress_close();
 
+    run_options();
     if (g_opt.start) {
         UINT rc;
         char show[16];
@@ -1138,12 +1526,20 @@ static BOOL install(void)
     }
     inf_text("Setup", "Done", "%PRODUCT% %VERSION% has been installed in %DIR%.", t, sizeof(t));
     say(t, MB_ICONINFORMATION);
+    offer_restart();
     return TRUE;
 }
 
 /* Removes the WIN.INI entries and the Program Manager group. */
 static void unregister(void)
 {
+    int i;
+    for (i = 0; i < g_nopts; i++)
+        if (g_opts[i].was_on) {
+            option_revert(&g_opts[i]);
+            if (g_opts[i].restart)
+                g_need_restart = TRUE;
+        }
     if (g_auto[0])
         edit_load(NULL);
     WriteProfileString(g_key, NULL, NULL);
@@ -1153,7 +1549,7 @@ static void unregister(void)
 
 /* Deletes the installed files (as listed in dir\SETUP.INF, plus its
  * [Uninstall] list) and the directories that are empty afterwards. */
-static BOOL remove_files(const char *dirname)
+static BOOL remove_files(const char *dirname, BOOL quiet)
 {
     char dir[MAX_PATHLEN], path[MAX_PATHLEN + 64], t[MAX_TEXT];
     static const char *own[] = { "SETUP.EXE", "SETUP.INF", "SETUP.LOG" };
@@ -1165,7 +1561,10 @@ static BOOL remove_files(const char *dirname)
     wsprintf(g_inf, "%sSETUP.INF", (LPSTR)dir);
     if (!load_inf()) {
         wsprintf(t, "%s does not contain an installation (SETUP.INF is missing).", (LPSTR)dirname);
-        say(t, MB_ICONSTOP);
+        if (quiet)
+            log_line(t);
+        else
+            say(t, MB_ICONSTOP);
         return FALSE;
     }
     for (i = 0; i < g_nfiles; i++) {
@@ -1213,6 +1612,8 @@ static BOOL remove_files(const char *dirname)
     ok = rmdir(dirname) == 0;
     wsprintf(t, ok ? "removed %s" : "removed the files; %s is not empty", (LPSTR)dirname);
     log_line(t);
+    if (quiet)
+        return TRUE;
     if (ok)
         wsprintf(t, "%s has been removed.", (LPSTR)g_product);
     else
@@ -1241,18 +1642,22 @@ static BOOL spawn_remover(const char *dir)
         log_line("cannot copy SETUP.EXE to TEMP");
         return FALSE;
     }
-    wsprintf(cmd, "%s /X=%s%s", (LPSTR)tmp, (LPSTR)dir, (LPSTR)(g_silent ? " /S" : ""));
+    wsprintf(cmd, "%s /X=%s%s%s%s", (LPSTR)tmp, (LPSTR)dir, (LPSTR)(g_silent ? " /S" : ""),
+             (LPSTR)(g_need_restart ? " /R" : ""), (LPSTR)(g_cmd_restart ? " /RESTART" : ""));
     log_line(cmd);
     return WinExec(cmd, SW_SHOWNORMAL) >= 32;
 }
 
 static BOOL uninstall(void)
 {
-    char t[MAX_TEXT], dir[MAX_PATHLEN];
+    char t[MAX_TEXT], dir[MAX_PATHLEN], module[16];
+    BOOL ok;
     wsprintf(t, "Remove %s from %s?", (LPSTR)g_product, (LPSTR)g_opt.dir);
     log_line(t);
-    if (!g_silent && MessageBox(g_back, t, g_title, MB_YESNO | MB_ICONQUESTION) != IDYES)
+    if (!g_silent && !g_resumed && MessageBox(g_back, t, g_title, MB_YESNO | MB_ICONQUESTION) != IDYES)
         return FALSE;
+    if (shell_module(module))
+        return handover(TRUE);
     if (!check_running())
         return FALSE;
     unregister();
@@ -1264,7 +1669,24 @@ static BOOL uninstall(void)
         say("Setup could not remove the files. Delete the directory by hand.", MB_ICONSTOP);
         return FALSE;
     }
-    return remove_files(g_opt.dir);
+    ok = remove_files(g_opt.dir, FALSE);
+    offer_restart();
+    return ok;
+}
+
+/* Deletes the copy staged for a shell handover, unless it is still to run. */
+static void stage_cleanup(void)
+{
+    char stage[MAX_PATHLEN], exe[MAX_PATHLEN + 16];
+    stage_dir(stage);
+    wsprintf(exe, "%s\\SETUP.EXE", (LPSTR)stage);
+    if (!file_exists(exe) || list_has("run", exe))
+        return;
+    lstrcpy(exe, stage);
+    add_slash(exe);
+    if (lstrcmpi(exe, g_src) == 0)
+        return;
+    remove_files(stage, TRUE);
 }
 
 /* ---- WinMain ---------------------------------------------------------- */
@@ -1315,6 +1737,7 @@ static BOOL option(LPCSTR cmd, LPCSTR name, char *val, int size)
 int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
 {
     char t[MAX_PATHLEN + 32], logp[MAX_PATHLEN + 16];
+    static char rcmd[MAX_TEXT];
     int rc = 0, i;
     BOOL remove = FALSE;
     FARPROC dp;
@@ -1338,9 +1761,14 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         DWORD t0 = GetTickCount();
         while (GetModuleHandle(MODNAME) && GetTickCount() - t0 < 15000)
             pump();
-        remove_files(g_opt.dir);
+        remove_files(g_opt.dir, FALSE);
+        g_need_restart = option(cmd, "R", NULL, 0);
+        g_cmd_restart = option(cmd, "RESTART", NULL, 0);
+        offer_restart();
         wsprintf(logp, "%s%s.LOG", (LPSTR)g_src, (LPSTR)MODNAME_TMP);
         log_flush(logp);
+        if (g_restart_now)
+            ExitWindows(EW_RESTARTWINDOWS, 0);
         return 0;
     }
 
@@ -1349,11 +1777,23 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         temp_path(t, MODNAME_TMP ".EXE");
         file_delete(t);
     }
+    /* the copy left in TEMP by a shell handover */
+    stage_cleanup();
 
     wsprintf(g_inf, "%sSETUP.INF", (LPSTR)g_src);
     if (!load_inf()) {
         say("SETUP.INF is missing or damaged. Setup cannot continue.", MB_ICONSTOP);
         return 1;
+    }
+    /* the staged copy started from run= after a shell handover */
+    stage_dir(t);
+    add_slash(t);
+    if (option(cmd, "RESUME", NULL, 0)
+        || (lstrcmpi(t, g_src) == 0 && GetProfileString(g_key, "Resume", "", logp, sizeof(logp)))) {
+        resume_begin(rcmd, sizeof(rcmd));
+        cmd = rcmd;
+        g_resumed = TRUE;
+        g_silent = option(cmd, "S", NULL, 0);
     }
 
     /* defaults: the current installation or SETUP.INF */
@@ -1376,12 +1816,35 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     }
     if (g_nitems && option(cmd, g_switch, t, sizeof(t)) && item_index(t) >= 0)
         lstrcpy(g_opt.choice, t);
+    for (i = 0; i < g_nopts; i++) {
+        OptionDef *o = &g_opts[i];
+        char sec[32], v[4];
+        wsprintf(sec, "Option.%s", (LPSTR)o->name);
+        o->on = GetPrivateProfileInt(sec, "Default", 1, g_inf) != 0;
+        if (g_installed && GetProfileString(g_key, sec, "", v, sizeof(v))) {
+            o->was_on = v[0] == '1';
+            o->on = o->was_on;
+        }
+        wsprintf(t, "NO%s", (LPSTR)o->sw);
+        if (option(cmd, o->sw, NULL, 0))
+            o->on = TRUE;
+        if (option(cmd, t, NULL, 0))
+            o->on = FALSE;
+    }
+    if (option(cmd, "LOAD", NULL, 0))
+        g_opt.load = TRUE;
+    if (option(cmd, "GROUP", NULL, 0))
+        g_opt.group = TRUE;
+    if (option(cmd, "START", NULL, 0))
+        g_opt.start = TRUE;
     if (option(cmd, "NOLOAD", NULL, 0))
         g_opt.load = FALSE;
     if (option(cmd, "NOGROUP", NULL, 0))
         g_opt.group = FALSE;
-    if (option(cmd, "NOSTART", NULL, 0))
+    g_nostart = option(cmd, "NOSTART", NULL, 0);
+    if (g_nostart)
         g_opt.start = FALSE;
+    g_cmd_restart = option(cmd, "RESTART", NULL, 0);
     g_opt.load = g_opt.load && g_auto[0];
     g_opt.group = g_opt.group && g_group[0];
     g_opt.start = g_opt.start && g_run[0];
@@ -1395,7 +1858,7 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         UpdateWindow(g_back);
     }
 
-    if (!remove && !g_silent) {
+    if (!remove && !g_silent && !g_resumed) {
         dp = MakeProcInstance((FARPROC)MainProc, inst);
         i = DialogBox(inst, MAKEINTRESOURCE(IDD_MAIN), g_back, (DLGPROC)dp);
         FreeProcInstance(dp);
@@ -1422,6 +1885,17 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     } else {
         wsprintf(logp, "%s\\SETUP.LOG", (LPSTR)g_opt.dir);
     }
+    if (g_resumed && rc == 0) {
+        /* back to the product as the shell: Windows has to restart */
+        GetPrivateProfileString("boot", "shell", "progman.exe", t, sizeof(t), "SYSTEM.INI");
+        if (lstrcmpi(base_name(t), "PROGMAN.EXE") != 0) {
+            wsprintf(t, "Setup will now restart Windows to start %s.", (LPSTR)g_product);
+            log_line(t);
+            if (!g_silent)
+                MessageBox(g_back, t, g_title, MB_OK | MB_ICONINFORMATION);
+            g_restart_now = TRUE;
+        }
+    }
     if (!log_flush(logp)) {
         /* no installation directory */
         GetWindowsDirectory(logp, sizeof(logp) - 16);
@@ -1431,5 +1905,8 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     }
     if (g_back)
         DestroyWindow(g_back);
+    if (g_restart_now && !ExitWindows(EW_RESTARTWINDOWS, 0) && !g_silent)
+        MessageBox(NULL, "Windows could not be restarted because a program refused to close. Restart "
+                   "Windows to complete the installation.", g_title, MB_OK | MB_ICONEXCLAMATION);
     return rc;
 }

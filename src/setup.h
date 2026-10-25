@@ -16,3 +16,7 @@
 #define IDC_REMOVE      209
 #define IDC_STATUS      210
 #define IDC_GAUGE       211
+#define IDC_OPT1        212     /* IDC_OPT1 .. IDC_OPT1 + 3: [Options] */
+#define IDC_OPT2        213
+#define IDC_OPT3        214
+#define IDC_OPT4        215
