@@ -155,10 +155,10 @@ back if the entry still has the option's value. The option's state is `Option.<n
 
 **Shell handover:** a running shell cannot be stopped (ending it ends Windows), so its files cannot be replaced or
 deleted. If `SYSTEM.INI` `shell=` names a program in the installation directory and it is running, Setup copies
-itself (and, for an installation, the product's files) to `TEMP\W16STAGE`, keeps the chosen options in `WIN.INI`
-`[<Key>]` `Resume=`, makes Program Manager the shell, adds the copy to `WIN.INI` `run=` and restarts Windows. The copy,
-started by Program Manager, puts `shell=` back, finishes the installation or removal and restarts Windows again if
-the product is the shell. `[Running]` entries for the shell's module are skipped. The next run of any Win16Setup
+itself (and, for an installation, the product's files) to `TEMP\W16STAGE`, keeps the chosen options and the old
+`shell=` in `RESUME.INI` there, makes Program Manager the shell, adds the copy to `WIN.INI` `run=` and restarts
+Windows. The copy, started by Program Manager, puts `shell=` back, removes itself from `run=`, finishes the
+installation or removal and restarts Windows again if the product is the shell. `[Running]` entries for the shell's module are skipped. The next run of any Win16Setup
 deletes the staged copy.
 
 **Preview images:** a DIB of at most 64 KB, shown centred in a 320 × 200 area; `tools/w16pack.py preview in.png
