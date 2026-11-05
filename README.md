@@ -164,7 +164,8 @@ back if the entry still has the option's value. The option's state is `Option.<n
 before the line that starts Windows (`WIN`, `C:\WINDOWS\WIN.COM /3`...) or at the end if there is none; a line
 that is there already is not added twice. Before the first change the file is copied to `AUTOEXEC.W16`. The lines
 added are recorded in `WIN.INI` `[<Key>]` `Autoexec.<name>.<n>=`; turning the option off or removing the product
-deletes exactly those lines. `Reboot=1` then offers to restart the computer instead of Windows (silent: only with
+deletes exactly those lines. When a new version of the product has a different line (another driver, another
+directory), installing it replaces the line it recorded. `Reboot=1` then offers to restart the computer instead of Windows (silent: only with
 `/RESTART`); `MinCPU=386` greys out an option for drivers that need a 386.
 
 **Shell handover:** a running shell cannot be stopped (ending it ends Windows), so its files cannot be replaced or

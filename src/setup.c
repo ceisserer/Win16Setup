@@ -1463,17 +1463,27 @@ static void option_apply(OptionDef *o)
     option_program(sec, "Load", t, NULL);
     if (t[0])
         edit_list("load", t, t);
-    /* AutoexecN=: lines for AUTOEXEC.BAT, recorded as written */
-    for (n = 1;; n++) {
+    /* AutoexecN=: lines for AUTOEXEC.BAT, recorded as written. A line an
+       older version added that is no longer the same (another driver,
+       another directory) is taken out first, as are lines beyond the
+       ones there are now. */
+    for (n = 1; n <= 9; n++) {
+        BOOL have;
         wsprintf(ik, "Autoexec%d", n);
-        if (!inf_get(sec, ik, "", t, sizeof(t)))
-            break;
-        expand(t, e, sizeof(e), NULL);
-        trim(e);
-        if (autoexec_add(e)) {
-            wsprintf(ok, "Autoexec.%s.%d", (LPSTR)o->name, n);
-            WriteProfileString(g_key, ok, e);
+        wsprintf(ok, "Autoexec.%s.%d", (LPSTR)o->name, n);
+        have = inf_get(sec, ik, "", t, sizeof(t)) != 0;
+        if (have) {
+            expand(t, e, sizeof(e), NULL);
+            trim(e);
         }
+        if (GetProfileString(g_key, ok, "", saved, sizeof(saved))
+            && (!have || lstrcmpi(saved, e) != 0)) {
+            autoexec_remove(saved);
+            WriteProfileString(g_key, ok, NULL);
+            g_need_reboot = TRUE;       /* the computer loads something else now */
+        }
+        if (have && autoexec_add(e))
+            WriteProfileString(g_key, ok, e);
     }
 }
 
