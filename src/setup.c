@@ -65,6 +65,8 @@ typedef struct {
     BOOL on;                        /* chosen */
     BOOL was_on;                    /* recorded in WIN.INI [<key>] */
     BOOL restart;                   /* changing it needs a restart of Windows */
+    BOOL reboot;                    /* ... a restart of the computer (AUTOEXEC.BAT) */
+    BOOL unusable;                  /* MinCPU= not met: off and greyed */
 } OptionDef;
 
 typedef struct {
@@ -95,6 +97,8 @@ static BOOL g_nostart;              /* /NOSTART: start no programs */
 static BOOL g_resumed;              /* second half of a shell handover */
 static BOOL g_need_restart;         /* an option needing a restart changed */
 static BOOL g_restart_now;          /* restart Windows when Setup ends */
+static BOOL g_need_reboot;          /* an option needing a restart of the computer changed */
+static BOOL g_reboot_now;           /* restart the computer when Setup ends */
 static BOOL g_cmd_restart;          /* /RESTART: silent installs may restart */
 static OptionDef g_opts[MAX_OPTIONS];
 static int  g_nopts;
@@ -405,6 +409,11 @@ static BOOL load_inf(void)
         inf_get(sec, "Switch", o->name, o->sw, sizeof(o->sw));
         AnsiUpper(o->sw);
         o->restart = GetPrivateProfileInt(sec, "Restart", 0, g_inf) != 0;
+        o->reboot = GetPrivateProfileInt(sec, "Reboot", 0, g_inf) != 0;
+        /* MinCPU=386: the option needs a 386 or better */
+        if (GetPrivateProfileInt(sec, "MinCPU", 0, g_inf) >= 386
+            && !(GetWinFlags() & (WF_CPU386 | WF_CPU486)))
+            o->unusable = TRUE;
     }
     inf_get("Autostart", "Program", "", g_auto, sizeof(g_auto));
     inf_get("Group", "Name", "", g_group, sizeof(g_group));
@@ -1097,6 +1106,8 @@ BOOL CALLBACK __export MainProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 wsprintf(sec, "Option.%s", (LPSTR)g_opts[i].name);
             feature(dlg, IDC_OPT1 + i, i < g_nopts, sec, i < g_nopts ? g_opts[i].name : "",
                     i < g_nopts && g_opts[i].on);
+            if (i < g_nopts && g_opts[i].unusable && !g_opts[i].was_on)
+                EnableWindow(GetDlgItem(dlg, IDC_OPT1 + i), FALSE);
         }
         feature(dlg, IDC_LOAD, g_auto[0] != 0, "Autostart", "Start %PRODUCT% with &Windows", g_opt.load);
         feature(dlg, IDC_GROUP, g_group[0] != 0, "Group", "Create a Program Manager &group", g_opt.group);
@@ -1203,6 +1214,201 @@ static void option_program(LPCSTR section, LPCSTR key, char *path, char *extra)
         lstrcpy(path, e);
 }
 
+/* ---- AUTOEXEC.BAT ------------------------------------------------------ */
+
+#define AUTOEXEC_MAX    8192
+static char FAR *s_ae;              /* AUTOEXEC.BAT as read (global heap) */
+static char FAR *s_aeout;           /* ... as written */
+
+static BOOL autoexec_buffers(void)
+{
+    if (!s_ae) {
+        s_ae = (char FAR *)GlobalLock(GlobalAlloc(GMEM_MOVEABLE, AUTOEXEC_MAX));
+        s_aeout = (char FAR *)GlobalLock(GlobalAlloc(GMEM_MOVEABLE, AUTOEXEC_MAX + MAX_TEXT + 4));
+    }
+    return s_ae && s_aeout;
+}
+
+/* X:\AUTOEXEC.BAT of the drive DOS booted from */
+static void autoexec_path(char *path, char *backup)
+{
+    union REGS r;
+    char drive = 'C';
+    r.x.ax = 0x3305;                    /* boot drive, DOS 4+ */
+    intdos(&r, &r);
+    if (r.h.dl >= 1 && r.h.dl <= 26)
+        drive = (char)('A' + r.h.dl - 1);
+    wsprintf(path, "%c:\\AUTOEXEC.BAT", drive);
+    if (backup)
+        wsprintf(backup, "%c:\\AUTOEXEC.W16", drive);
+}
+
+/* the line without leading and trailing blanks */
+static void trim(char *t)
+{
+    char *p = t;
+    int n;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (p != t)
+        lstrcpy(t, p);
+    n = lstrlen(t);
+    while (n > 0 && (t[n - 1] == ' ' || t[n - 1] == '\t'))
+        t[--n] = 0;
+}
+
+/* Is the line the one starting Windows ("WIN", "C:\WINDOWS\WIN /3")? */
+static BOOL starts_windows(const char *line)
+{
+    char t[MAX_TEXT], *p, *name;
+    lstrcpyn(t, line, sizeof(t));
+    trim(t);
+    p = t;
+    if (*p == '@')
+        p++;
+    for (name = p; *p && *p != ' ' && *p != '/' && *p != '\t'; p++)
+        if (*p == '\\' || *p == ':')
+            name = p + 1;
+    *p = 0;
+    return lstrcmpi(name, "WIN") == 0 || lstrcmpi(name, "WIN.COM") == 0;
+}
+
+/* Reads AUTOEXEC.BAT into s_ae (without a closing ^Z); FALSE if too big */
+static BOOL autoexec_read(const char *path, UINT *len)
+{
+    HFILE f = _lopen(path, OF_READ | OF_SHARE_DENY_NONE);
+    UINT n;
+    *len = 0;
+    if (!autoexec_buffers())
+        return FALSE;
+    s_ae[0] = 0;
+    if (f == HFILE_ERROR)
+        return TRUE;                    /* none yet */
+    n = _lread(f, s_ae, AUTOEXEC_MAX - 1);
+    _lclose(f);
+    if (n == (UINT)-1 || n >= AUTOEXEC_MAX - 1)
+        return FALSE;
+    while (n > 0 && s_ae[n - 1] == 0x1A)
+        n--;
+    s_ae[n] = 0;
+    *len = n;
+    return TRUE;
+}
+
+static BOOL autoexec_write(const char *path, const char FAR *text, UINT len)
+{
+    unsigned attr = 0;
+    HFILE f;
+    BOOL ok;
+    _dos_getfileattr(path, &attr);
+    if (attr & (_A_RDONLY | _A_HIDDEN | _A_SYSTEM))
+        _dos_setfileattr(path, _A_NORMAL);
+    f = _lcreat(path, 0);
+    ok = f != HFILE_ERROR && _lwrite(f, text, len) == len;
+    if (f != HFILE_ERROR)
+        _lclose(f);
+    if (attr & (_A_RDONLY | _A_HIDDEN | _A_SYSTEM))
+        _dos_setfileattr(path, attr & ~_A_ARCH);
+    return ok;
+}
+
+/* Adds the line to AUTOEXEC.BAT before the line starting Windows (else at
+ * the end), unless it is there already. The file as it was is kept as
+ * AUTOEXEC.W16 (only the first time). */
+static BOOL autoexec_add(const char *line)
+{
+    char path[16], backup[16], cur[MAX_TEXT], want[MAX_TEXT];
+    char FAR *out = s_aeout;
+    UINT len, o = 0, i, start, insert = (UINT)-1;
+    lstrcpyn(want, line, sizeof(want));
+    trim(want);
+    autoexec_path(path, backup);
+    if (!autoexec_read(path, &len)) {
+        log_line("AUTOEXEC.BAT is too large, not changed");
+        return FALSE;
+    }
+    for (i = 0; i <= len; ) {
+        start = i;
+        while (i < len && s_ae[i] != '\r' && s_ae[i] != '\n')
+            i++;
+        lstrcpyn(cur, s_ae + start, (int)(i - start + 1 < sizeof(cur) ? i - start + 1 : sizeof(cur)));
+        trim(cur);
+        if (lstrcmpi(cur, want) == 0) {
+            log_line("AUTOEXEC.BAT already has the line");
+            return TRUE;
+        }
+        if (insert == (UINT)-1 && starts_windows(cur))
+            insert = start;
+        if (i < len && s_ae[i] == '\r')
+            i++;
+        if (i < len && s_ae[i] == '\n')
+            i++;
+        if (i == start)
+            break;
+    }
+    if (!file_exists(backup) && len)
+        copy_file(path, backup);
+    if (insert == (UINT)-1) {
+        /* at the end */
+        _fmemcpy(out, s_ae, len);
+        o = len;
+        if (o && out[o - 1] != '\n') {
+            out[o++] = '\r';
+            out[o++] = '\n';
+        }
+        o += wsprintf(out + o, "%s\r\n", (LPSTR)want);
+    } else {
+        _fmemcpy(out, s_ae, insert);
+        o = insert;
+        o += wsprintf(out + o, "%s\r\n", (LPSTR)want);
+        _fmemcpy(out + o, s_ae + insert, len - insert);
+        o += len - insert;
+    }
+    if (!autoexec_write(path, out, o)) {
+        log_line("cannot write AUTOEXEC.BAT");
+        return FALSE;
+    }
+    wsprintf(cur, "AUTOEXEC.BAT: added %s", (LPSTR)want);
+    log_line(cur);
+    return TRUE;
+}
+
+/* Removes every line equal to this one (blanks and case aside) */
+static void autoexec_remove(const char *line)
+{
+    char path[16], cur[MAX_TEXT], want[MAX_TEXT];
+    char FAR *out = s_aeout;
+    UINT len, o = 0, i, start, end;
+    BOOL found = FALSE;
+    lstrcpyn(want, line, sizeof(want));
+    trim(want);
+    autoexec_path(path, NULL);
+    if (!want[0] || !autoexec_read(path, &len) || !len)
+        return;
+    for (i = 0; i < len; ) {
+        start = i;
+        while (i < len && s_ae[i] != '\r' && s_ae[i] != '\n')
+            i++;
+        end = i;
+        if (i < len && s_ae[i] == '\r')
+            i++;
+        if (i < len && s_ae[i] == '\n')
+            i++;
+        lstrcpyn(cur, s_ae + start, (int)(end - start + 1 < sizeof(cur) ? end - start + 1 : sizeof(cur)));
+        trim(cur);
+        if (lstrcmpi(cur, want) == 0) {
+            found = TRUE;
+            continue;
+        }
+        _fmemcpy(out + o, s_ae + start, i - start);
+        o += i - start;
+    }
+    if (found && autoexec_write(path, out, o)) {
+        wsprintf(cur, "AUTOEXEC.BAT: removed %s", (LPSTR)want);
+        log_line(cur);
+    }
+}
+
 /* Turns an option on: its IniN= entries are written (the old values are
  * kept in WIN.INI [<key>] Old.<name>.<n>, '>' + value or '*' for none),
  * its Load= program is added to load=. */
@@ -1236,6 +1442,18 @@ static void option_apply(OptionDef *o)
     option_program(sec, "Load", t, NULL);
     if (t[0])
         edit_list("load", t, t);
+    /* AutoexecN=: lines for AUTOEXEC.BAT, recorded as written */
+    for (n = 1;; n++) {
+        wsprintf(ik, "Autoexec%d", n);
+        if (!inf_get(sec, ik, "", t, sizeof(t)))
+            break;
+        expand(t, e, sizeof(e), NULL);
+        trim(e);
+        if (autoexec_add(e)) {
+            wsprintf(ok, "Autoexec.%s.%d", (LPSTR)o->name, n);
+            WriteProfileString(g_key, ok, e);
+        }
+    }
 }
 
 /* Turns an option off (or removes it): entries still holding our value get
@@ -1269,6 +1487,14 @@ static void option_revert(OptionDef *o)
     option_program(sec, "Load", t, NULL);
     if (t[0])
         edit_list("load", t, NULL);
+    /* the AUTOEXEC.BAT lines that were added (as recorded) */
+    for (n = 1; n <= 9; n++) {
+        wsprintf(ok, "Autoexec.%s.%d", (LPSTR)o->name, n);
+        if (!GetProfileString(g_key, ok, "", saved, sizeof(saved)))
+            continue;
+        autoexec_remove(saved);
+        WriteProfileString(g_key, ok, NULL);
+    }
 }
 
 /* Applies the chosen options and records them in WIN.INI [<key>]. */
@@ -1286,6 +1512,8 @@ static void apply_options(void)
         WriteProfileString(g_key, ok, o->on ? "1" : "0");
         if (o->restart && o->on != o->was_on)
             g_need_restart = TRUE;
+        if (o->reboot && o->on != o->was_on)
+            g_need_reboot = TRUE;
     }
 }
 
@@ -1314,6 +1542,19 @@ static void run_options(void)
  * with /RESTART). The restart happens when Setup ends. */
 static void offer_restart(void)
 {
+    if (g_need_reboot && !g_reboot_now) {
+        /* a DOS driver in AUTOEXEC.BAT: the computer has to restart */
+        if (g_silent ? !g_cmd_restart
+                     : MessageBox(g_back, "The computer must be restarted for the changes to take "
+                                  "effect (AUTOEXEC.BAT was changed).\r\n\r\nRestart the computer now?",
+                                  g_title, MB_YESNO | MB_ICONQUESTION) != IDYES) {
+            log_line("restart of the computer postponed");
+            return;
+        }
+        log_line("restarting the computer");
+        g_reboot_now = TRUE;
+        return;
+    }
     if (!g_need_restart || g_resumed)
         return;
     if (g_silent ? !g_cmd_restart
@@ -1545,6 +1786,8 @@ static void unregister(void)
             option_revert(&g_opts[i]);
             if (g_opts[i].restart)
                 g_need_restart = TRUE;
+            if (g_opts[i].reboot)
+                g_need_reboot = TRUE;
         }
     if (g_auto[0])
         edit_load(NULL);
@@ -1648,8 +1891,9 @@ static BOOL spawn_remover(const char *dir)
         log_line("cannot copy SETUP.EXE to TEMP");
         return FALSE;
     }
-    wsprintf(cmd, "%s /X=%s%s%s%s", (LPSTR)tmp, (LPSTR)dir, (LPSTR)(g_silent ? " /S" : ""),
-             (LPSTR)(g_need_restart ? " /R" : ""), (LPSTR)(g_cmd_restart ? " /RESTART" : ""));
+    wsprintf(cmd, "%s /X=%s%s%s%s%s", (LPSTR)tmp, (LPSTR)dir, (LPSTR)(g_silent ? " /S" : ""),
+             (LPSTR)(g_need_restart ? " /R" : ""), (LPSTR)(g_need_reboot ? " /RB" : ""),
+             (LPSTR)(g_cmd_restart ? " /RESTART" : ""));
     log_line(cmd);
     return WinExec(cmd, SW_SHOWNORMAL) >= 32;
 }
@@ -1769,11 +2013,14 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
             pump();
         remove_files(g_opt.dir, FALSE);
         g_need_restart = option(cmd, "R", NULL, 0);
+        g_need_reboot = option(cmd, "RB", NULL, 0);
         g_cmd_restart = option(cmd, "RESTART", NULL, 0);
         offer_restart();
         wsprintf(logp, "%s%s.LOG", (LPSTR)g_src, (LPSTR)MODNAME_TMP);
         log_flush(logp);
-        if (g_restart_now)
+        if (g_reboot_now)
+            ExitWindows(EW_REBOOTSYSTEM, 0);
+        else if (g_restart_now)
             ExitWindows(EW_RESTARTWINDOWS, 0);
         return 0;
     }
@@ -1835,6 +2082,8 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         if (option(cmd, o->sw, NULL, 0))
             o->on = TRUE;
         if (option(cmd, t, NULL, 0))
+            o->on = FALSE;
+        if (o->unusable && !o->was_on)
             o->on = FALSE;
     }
     if (option(cmd, "LOAD", NULL, 0))
@@ -1911,7 +2160,10 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     }
     if (g_back)
         DestroyWindow(g_back);
-    if (g_restart_now && !ExitWindows(EW_RESTARTWINDOWS, 0) && !g_silent)
+    if (g_reboot_now && !ExitWindows(EW_REBOOTSYSTEM, 0) && !g_silent)
+        MessageBox(NULL, "The computer could not be restarted because a program refused to close. "
+                   "Restart it to complete the installation.", g_title, MB_OK | MB_ICONEXCLAMATION);
+    else if (!g_reboot_now && g_restart_now && !ExitWindows(EW_RESTARTWINDOWS, 0) && !g_silent)
         MessageBox(NULL, "Windows could not be restarted because a program refused to close. Restart "
                    "Windows to complete the installation.", g_title, MB_OK | MB_ICONEXCLAMATION);
     return rc;
