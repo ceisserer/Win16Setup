@@ -138,6 +138,13 @@ Restart=1                     ; offer to restart Windows when the option changes
 Ini1=%WINDIR%\SYSTEM.INI,boot,shell,%DIR%\MYSHELL.EXE   ; file,section,key,value
 Ini2=%WINDIR%\SYSTEM.INI,boot,taskman.exe,%DIR%\MYSHELL.EXE
 
+[Option.Lfn]
+Label=Long file names in &DOS (needs a restart)
+Default=0
+MinCPU=386                    ; greyed out (and off) on a 286
+Reboot=1                      ; offer to restart the computer when the option changes
+Autoexec1=%DIR%\LFN\LFNDRV.COM ; line added to AUTOEXEC.BAT (up to 9), before the line starting Windows
+
 [Option.Look]
 Label=&Extra look
 Ini1=%DIR%\LOOK\LOOK.INI,Look,Theme,%CHOICE%
@@ -152,6 +159,13 @@ The choice is stored in `WIN.INI` `[<Key>]` `Choice=` and is the default when Se
 **Options:** an option that is on writes its `Ini<n>=` entries. The value an entry had before (or that it was
 missing) is kept in `WIN.INI` `[<Key>]` `Old.<name>.<n>=`; turning the option off, or removing the product, puts it
 back if the entry still has the option's value. The option's state is `Option.<name>=` there.
+
+**AUTOEXEC.BAT:** an option's `Autoexec<n>=` lines go into `AUTOEXEC.BAT` of the boot drive (INT 21h 3305h),
+before the line that starts Windows (`WIN`, `C:\WINDOWS\WIN.COM /3`...) or at the end if there is none; a line
+that is there already is not added twice. Before the first change the file is copied to `AUTOEXEC.W16`. The lines
+added are recorded in `WIN.INI` `[<Key>]` `Autoexec.<name>.<n>=`; turning the option off or removing the product
+deletes exactly those lines. `Reboot=1` then offers to restart the computer instead of Windows (silent: only with
+`/RESTART`); `MinCPU=386` greys out an option for drivers that need a 386.
 
 **Shell handover:** a running shell cannot be stopped (ending it ends Windows), so its files cannot be replaced or
 deleted. If `SYSTEM.INI` `shell=` names a program in the installation directory and it is running, Setup copies
