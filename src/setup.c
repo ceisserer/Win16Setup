@@ -43,6 +43,7 @@
 #include <windows.h>
 #include <ddeml.h>
 #include <dos.h>
+#include <stdio.h>
 #include <direct.h>
 #include <string.h>
 #include "setup.h"
@@ -1295,21 +1296,38 @@ static BOOL autoexec_read(const char *path, UINT *len)
     return TRUE;
 }
 
+/* Writes AUTOEXEC.BAT safely: into AUTOEXEC.$W$ first, which then takes
+   the place of the file (an interrupted write leaves the old file) */
 static BOOL autoexec_write(const char *path, const char FAR *text, UINT len)
 {
+    char tmp[16];
     unsigned attr = 0;
     HFILE f;
     BOOL ok;
-    _dos_getfileattr(path, &attr);
-    if (attr & (_A_RDONLY | _A_HIDDEN | _A_SYSTEM))
+    lstrcpy(tmp, path);
+    lstrcpy(tmp + lstrlen(tmp) - 3, "$W$");
+    f = _lcreat(tmp, 0);
+    if (f == HFILE_ERROR)
+        return FALSE;
+    ok = _lwrite(f, text, len) == len;
+    _lclose(f);
+    if (!ok || file_size(tmp) != (long)len) {
+        file_delete(tmp);
+        return FALSE;
+    }
+    if (_dos_getfileattr(path, &attr) == 0) {
         _dos_setfileattr(path, _A_NORMAL);
-    f = _lcreat(path, 0);
-    ok = f != HFILE_ERROR && _lwrite(f, text, len) == len;
-    if (f != HFILE_ERROR)
-        _lclose(f);
+        if (remove(path) != 0) {
+            _dos_setfileattr(path, attr);
+            file_delete(tmp);
+            return FALSE;
+        }
+    }
+    if (rename(tmp, path) != 0)
+        return FALSE;
     if (attr & (_A_RDONLY | _A_HIDDEN | _A_SYSTEM))
-        _dos_setfileattr(path, attr & ~_A_ARCH);
-    return ok;
+        _dos_setfileattr(path, attr & (_A_RDONLY | _A_HIDDEN | _A_SYSTEM));
+    return TRUE;
 }
 
 /* Adds the line to AUTOEXEC.BAT before the line starting Windows (else at
@@ -1318,7 +1336,7 @@ static BOOL autoexec_write(const char *path, const char FAR *text, UINT len)
 static BOOL autoexec_add(const char *line)
 {
     char path[16], backup[16], cur[MAX_TEXT], want[MAX_TEXT];
-    char FAR *out = s_aeout;
+    char FAR *out;
     UINT len, o = 0, i, start, insert = (UINT)-1;
     lstrcpyn(want, line, sizeof(want));
     trim(want);
@@ -1327,6 +1345,7 @@ static BOOL autoexec_add(const char *line)
         log_line("AUTOEXEC.BAT is too large, not changed");
         return FALSE;
     }
+    out = s_aeout;                      /* allocated by autoexec_read */
     for (i = 0; i <= len; ) {
         start = i;
         while (i < len && s_ae[i] != '\r' && s_ae[i] != '\n')
@@ -1377,7 +1396,7 @@ static BOOL autoexec_add(const char *line)
 static void autoexec_remove(const char *line)
 {
     char path[16], cur[MAX_TEXT], want[MAX_TEXT];
-    char FAR *out = s_aeout;
+    char FAR *out;
     UINT len, o = 0, i, start, end;
     BOOL found = FALSE;
     lstrcpyn(want, line, sizeof(want));
@@ -1385,6 +1404,7 @@ static void autoexec_remove(const char *line)
     autoexec_path(path, NULL);
     if (!want[0] || !autoexec_read(path, &len) || !len)
         return;
+    out = s_aeout;
     for (i = 0; i < len; ) {
         start = i;
         while (i < len && s_ae[i] != '\r' && s_ae[i] != '\n')
