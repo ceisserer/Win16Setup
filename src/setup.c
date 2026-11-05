@@ -1658,6 +1658,8 @@ static void resume_args(char *cmd, BOOL remove)
     }
     if (g_silent)
         lstrcat(cmd, " /S");
+    if (g_cmd_restart)                  /* the resumed copy may restart the computer */
+        lstrcat(cmd, " /RESTART");
 }
 
 /* The product is the running shell: continue after a restart of Windows
